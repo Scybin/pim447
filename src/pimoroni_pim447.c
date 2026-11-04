@@ -9,6 +9,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/irq.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/logging/log.h>
 #include <zmk/events/activity_state_changed.h>
 #include <zmk/keymap.h>
@@ -19,8 +20,17 @@
 
 LOG_MODULE_REGISTER(zmk_pimoroni_pim447, CONFIG_ZMK_PIMORONI_PIM447_LOG_LEVEL);
 
-/* Statically initialized so it is safe to use even if the driver init fails. */
-struct k_mutex pim447_settings_lock;
+/* A missing INT GPIO selects I2C polling; no header struct changes are needed. */
+#define PIM447_HAS_IRQ DT_INST_NODE_HAS_PROP(0, int_gpios)
+
+#if !PIM447_HAS_IRQ
+static void pimoroni_pim447_poll_handler(struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(pim447_poll_work, pimoroni_pim447_poll_handler);
+static atomic_t pim447_polling_active = ATOMIC_INIT(0);
+#endif
+
+/* Statically initialize the shared settings mutex. */
+K_MUTEX_DEFINE(pim447_settings_lock);
 
 struct pim447_settings pim447_settings = {
     .mouse_max_speed = 25,
@@ -89,7 +99,14 @@ void pim447_enable_sleep(const struct device *dev)
 
     set_leds_unlocked(config, 0, 0, 0, 0);
 
+#if !PIM447_HAS_IRQ
+    /* Gate the already-submitted input work before releasing the I2C lock. */
+    atomic_clear(&pim447_polling_active);
+#endif
     k_mutex_unlock(&data->i2c_lock);
+#if !PIM447_HAS_IRQ
+    (void)k_work_cancel_delayable(&pim447_poll_work);
+#endif
 
     LOG_DBG("PIM447 sleep enabled");
 }
@@ -119,7 +136,14 @@ void pim447_disable_sleep(const struct device *dev)
     /* Leave the LED off on wake; movement re-colours it from the hue cycle. */
     set_leds_unlocked(config, 0, 0, 0, 0);
 
+#if !PIM447_HAS_IRQ
+    atomic_set(&pim447_polling_active, 1);
+#endif
     k_mutex_unlock(&data->i2c_lock);
+#if !PIM447_HAS_IRQ
+    (void)k_work_reschedule(&pim447_poll_work,
+                            K_MSEC(CONFIG_ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS));
+#endif
 
     LOG_DBG("PIM447 sleep disabled");
 }
@@ -221,6 +245,12 @@ static void pimoroni_pim447_work_handler(struct k_work *work)
     LOG_DBG("PIM447 work handler triggered");
 
     k_mutex_lock(&data->i2c_lock, K_FOREVER);
+#if !PIM447_HAS_IRQ
+    if (!atomic_get(&pim447_polling_active)) {
+        k_mutex_unlock(&data->i2c_lock);
+        return;
+    }
+#endif
 
     ret = i2c_burst_read_dt(&config->i2c, REG_LEFT, buf, sizeof(buf));
     if (ret) {
@@ -246,6 +276,17 @@ static void pimoroni_pim447_work_handler(struct k_work *work)
 
     uint32_t time_between_interrupts;
     enum pim447_mode mode;
+
+#if !PIM447_HAS_IRQ
+    /* Update motion timing only for nonzero motion (not every empty poll). */
+    if (buf[0] || buf[1] || buf[2] || buf[3]) {
+        uint32_t now = k_uptime_get_32();
+        k_mutex_lock(&data->data_lock, K_FOREVER);
+        data->previous_interrupt_time = data->last_interrupt_time;
+        data->last_interrupt_time = now;
+        k_mutex_unlock(&data->data_lock);
+    }
+#endif
 
     k_mutex_lock(&data->data_lock, K_FOREVER);
     time_between_interrupts = data->last_interrupt_time - data->previous_interrupt_time;
@@ -367,6 +408,30 @@ static void pimoroni_pim447_work_handler(struct k_work *work)
     }
 }
 
+#if !PIM447_HAS_IRQ
+/* Schedule the already-existing read/report worker; the polling callback never
+ * touches I2C itself and does not duplicate the RGBW/button/mouse logic. */
+static void pimoroni_pim447_poll_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
+    if (!atomic_get(&pim447_polling_active)) {
+        return;
+    }
+
+    const struct device *dev = pim447_get_device();
+    if (dev != NULL) {
+        struct pimoroni_pim447_data *data = dev->data;
+        (void)k_work_submit(&data->irq_work);
+    }
+
+    if (atomic_get(&pim447_polling_active)) {
+        (void)k_work_reschedule(&pim447_poll_work,
+                                K_MSEC(CONFIG_ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS));
+    }
+}
+#endif
+
 /*
  * GPIO ISR: runs in interrupt context. k_mutex_* is not ISR-safe, so the
  * timestamp pair is updated under irq_lock instead. The work handler reads
@@ -432,6 +497,7 @@ static int pimoroni_pim447_enable(const struct device *dev)
 
     LOG_DBG("pimoroni_pim447_enable called");
 
+#if PIM447_HAS_IRQ
     if (!device_is_ready(config->int_gpio.port)) {
         LOG_ERR("Interrupt GPIO device is not ready");
         return -ENODEV;
@@ -463,6 +529,18 @@ static int pimoroni_pim447_enable(const struct device *dev)
         LOG_ERR("Failed to enable interrupt output");
         return ret;
     }
+
+#else
+    /* No INT wire: disable the external interrupt output and poll over I2C. */
+    ret = pimoroni_pim447_enable_interrupt(config, data, false);
+    if (ret) {
+        LOG_ERR("Failed to disable PIM447 INT output: %d", ret);
+        return ret;
+    }
+    atomic_set(&pim447_polling_active, 1);
+    (void)k_work_reschedule(&pim447_poll_work,
+                            K_MSEC(CONFIG_ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS));
+#endif
 
     LOG_DBG("pimoroni_pim447 enabled");
     return 0;
@@ -515,17 +593,17 @@ static int pimoroni_pim447_init(const struct device *dev)
                 chip_id, PIM447_CHIP_ID_EXPECTED);
     }
 
+    /* Both work items must be ready before interrupts or polling begin. */
+    k_work_init(&data->irq_work, pimoroni_pim447_work_handler);
+#if AUTOMOUSE_LAYER > 0
+    k_work_init(&automouse_deactivate_work, automouse_deactivate_work_handler);
+#endif
+
     ret = pimoroni_pim447_enable(dev);
     if (ret) {
         LOG_ERR("Failed to enable PIM447");
         return ret;
     }
-
-    k_work_init(&data->irq_work, pimoroni_pim447_work_handler);
-
-#if AUTOMOUSE_LAYER > 0
-    k_work_init(&automouse_deactivate_work, automouse_deactivate_work_handler);
-#endif
 
     LOG_INF("PIM447 driver initialized");
     return 0;
@@ -559,7 +637,7 @@ static void activate_automouse_layer(void)
 
 static const struct pimoroni_pim447_config pimoroni_pim447_config = {
     .i2c = I2C_DT_SPEC_INST_GET(0),
-    .int_gpio = GPIO_DT_SPEC_INST_GET(0, int_gpios),
+    .int_gpio = GPIO_DT_SPEC_INST_GET_OR(0, int_gpios, {0}),
 };
 
 static struct pimoroni_pim447_data pimoroni_pim447_data;
