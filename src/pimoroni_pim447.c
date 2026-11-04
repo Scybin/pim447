@@ -33,13 +33,32 @@ static atomic_t pim447_polling_active = ATOMIC_INIT(0);
 K_MUTEX_DEFINE(pim447_settings_lock);
 
 struct pim447_settings pim447_settings = {
-    .mouse_max_speed = 25,
-    .mouse_max_time = 5,
+    /* Moderate maximum gain, accelerated over a 20 ms reference window. */
+    .mouse_max_speed = 8,
+    .mouse_max_time = 20,
     .mouse_smoothing_factor = 1.3f,
     .scroll_max_speed = 1,
     .scroll_max_time = 1,
     .scroll_smoothing_factor = 0.5f,
     .hue_increment_factor = 0.3f,
+};
+
+/*
+ * Motion acceleration is per-driver-instance state.  This driver declares
+ * exactly one PIM447 device (DEVICE_DT_INST_DEFINE(0)), so a single state
+ * object is sufficient.  Protect all accesses with data->data_lock.
+ *
+ * Keep fractional counts so small acceleration gains are not rounded away.
+ */
+#define PIM447_ACCEL_START_COUNTS 0.5f
+#define PIM447_ACCEL_FULL_COUNTS  5.0f
+
+static struct {
+    float gain;
+    float remainder_x;
+    float remainder_y;
+} pim447_motion = {
+    .gain = 1.0f,
 };
 
 #define AUTOMOUSE_LAYER (DT_PROP(DT_DRV_INST(0), automouse_layer))
@@ -165,6 +184,10 @@ void pim447_toggle_mode(const struct device *dev)
     data->previous_y = 0;
     data->smoothed_x = 0;
     data->smoothed_y = 0;
+    /* Do not carry mouse movement fractions into scroll mode or vice versa. */
+    pim447_motion.gain = 1.0f;
+    pim447_motion.remainder_x = 0.0f;
+    pim447_motion.remainder_y = 0.0f;
     k_mutex_unlock(&data->data_lock);
 
     LOG_DBG("PIM447 mode switched to %s",
@@ -202,30 +225,79 @@ static void pim447_process_movement(struct pimoroni_pim447_data *data, int delta
                                     int delta_y, uint32_t time_between_interrupts,
                                     int max_speed, int max_time, float smoothing_factor)
 {
-    float scaling_factor = 1.0f;
+    /*
+     * Convert movement to an approximate number of sensor counts in the
+     * configurable reference window (mouse_max_time, initially 20 ms).
+     * Unlike the old '< 5 ms' test, this works with 20 ms I2C polling.
+     */
+    float interval_ms = (time_between_interrupts == 0)
+                            ? (float)CONFIG_ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS
+                            : (float)time_between_interrupts;
 
-    if (time_between_interrupts < (uint32_t)max_time) {
-        float exponent = -3.0f * (float)time_between_interrupts / (float)max_time;
-        scaling_factor = 1.0f + (max_speed - 1.0f) * expf(exponent);
+#if !PIM447_HAS_IRQ
+    /* Never infer a huge velocity from a spuriously short poll interval. */
+    if (interval_ms < (float)CONFIG_ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS) {
+        interval_ms = (float)CONFIG_ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS;
     }
+#else
+    if (interval_ms < 1.0f) {
+        interval_ms = 1.0f;
+    }
+#endif
+
+    const float reference_ms = (max_time > 0) ? (float)max_time : 20.0f;
+    const float dx = (float)delta_x;
+    const float dy = (float)delta_y;
+    const float counts_per_window = sqrtf(dx * dx + dy * dy) * reference_ms / interval_ms;
+
+    /*
+     * Smoothstep acceleration: precision at low movement rates and a
+     * progressively higher gain for faster rolls of the ball.
+     * mouse_max_speed is the maximum gain; mouse_max_time controls when
+     * acceleration begins by changing the measurement reference window.
+     */
+    float t = (counts_per_window - PIM447_ACCEL_START_COUNTS) /
+              (PIM447_ACCEL_FULL_COUNTS - PIM447_ACCEL_START_COUNTS);
+    if (t < 0.0f) {
+        t = 0.0f;
+    } else if (t > 1.0f) {
+        t = 1.0f;
+    }
+    const float curve = t * t * (3.0f - 2.0f * t);
+    const float maximum_gain = (max_speed > 1) ? (float)max_speed : 1.0f;
+    const float target_gain = 1.0f + (maximum_gain - 1.0f) * curve;
+
+    /*
+     * Smooth only the gain, not the raw sensor counts.  Values of
+     * smoothing_factor > 1 are now safe and cannot cause the overshoot
+     * produced by the previous (1 - smoothing_factor) formula.
+     * A higher smoothing factor means a more gradual gain transition.
+     */
+    if (smoothing_factor < 0.1f) {
+        smoothing_factor = 0.1f;
+    }
+    const float response = 1.0f / (1.0f + smoothing_factor);
 
     k_mutex_lock(&data->data_lock, K_FOREVER);
+
+    pim447_motion.gain += response * (target_gain - pim447_motion.gain);
+    float gain = pim447_motion.gain;
     if (data->mode == PIM447_MODE_SCROLL) {
-        scaling_factor *= 2.5f;
+        gain *= 2.5f; /* Preserve the original scroll-mode speed factor. */
     }
-    k_mutex_unlock(&data->data_lock);
 
-    int scaled_x_movement = (int)(delta_x * scaling_factor);
-    int scaled_y_movement = (int)(delta_y * scaling_factor);
+    /* Keep subpixel fractions instead of truncating them on each poll. */
+    const float movement_x = dx * gain + pim447_motion.remainder_x;
+    const float movement_y = dy * gain + pim447_motion.remainder_y;
+    const int report_x = (int)movement_x;
+    const int report_y = (int)movement_y;
+    pim447_motion.remainder_x = movement_x - (float)report_x;
+    pim447_motion.remainder_y = movement_y - (float)report_y;
 
-    k_mutex_lock(&data->data_lock, K_FOREVER);
-    data->smoothed_x =
-        (int)(smoothing_factor * scaled_x_movement + (1.0f - smoothing_factor) * data->previous_x);
-    data->smoothed_y =
-        (int)(smoothing_factor * scaled_y_movement + (1.0f - smoothing_factor) * data->previous_y);
-
-    data->previous_x = data->smoothed_x;
-    data->previous_y = data->smoothed_y;
+    data->smoothed_x = report_x;
+    data->smoothed_y = report_y;
+    data->previous_x = report_x;
+    data->previous_y = report_y;
     k_mutex_unlock(&data->data_lock);
 }
 
@@ -359,10 +431,14 @@ static void pimoroni_pim447_work_handler(struct k_work *work)
             }
         }
     } else {
-        /* No movement: decay the smoothing state so the next motion starts clean. */
+        /* Start a new motion burst from a precise 1x gain.  Retain fractional
+         * counts so small previous movements are not discarded. */
         k_mutex_lock(&data->data_lock, K_FOREVER);
+        pim447_motion.gain = 1.0f;
         data->previous_x = 0;
         data->previous_y = 0;
+        data->smoothed_x = 0;
+        data->smoothed_y = 0;
         k_mutex_unlock(&data->data_lock);
     }
 
