@@ -11,8 +11,8 @@ properties:
 
   int-gpios:
     type: phandle-array
-    required: true
-    description: Interrupt pin
+    required: false
+    description: Optional active-low interrupt GPIO; omit to use polling
 
   automouse-layer:
     type: int

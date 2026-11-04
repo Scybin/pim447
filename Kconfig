@@ -21,6 +21,13 @@ if ZMK_PIMORONI_PIM447
     int "Amount of milliseconds the mouse layer will be active after using the trackball"
     default 400
 
+  config ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS
+    int "PIM447 polling interval in milliseconds"
+    range 5 1000
+    default 20
+    help
+      Reads the trackball periodically over I2C if int-gpios is absent.
+
   config ZMK_PIM447_BEHAVIORS
     bool "Enable Pimoroni PIM447 Trackball Actions behavior"
     depends on ZMK_PIMORONI_PIM447
