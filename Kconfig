@@ -1,39 +1,80 @@
+
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2024 t0bybr
 
 config ZMK_PIMORONI_PIM447
-  bool "Pimoroni PIM447 Trackball support"
-  select ZMK_POINTING
-  select I2C
-  select GPIO
-  help
-    Enable driver for Pimoroni Trackball.
+    bool "Pimoroni PIM447 Trackball support"
+    select ZMK_POINTING
+    select I2C
+    select GPIO
+    help
+      Enable the Pimoroni PIM447 trackball driver.
+
+      The driver can run on a standalone keyboard,
+      split central, or split peripheral.
+
+      Supports mouse movement, scrolling,
+      RGBW lighting, and polling without INT.
 
 config ZMK_PIMORONI_PIM447_LOG_LEVEL
-  int "PIM447 log level"
-  default 3
-  help
-    Zephyr log level for the PIM447 driver. 0=NONE, 1=ERR, 2=WRN, 3=INF, 4=DBG.
+    int "PIM447 log level"
+    range 0 4
+    default 3
+    help
+      Zephyr log level for the PIM447 driver.
+
+      0 = NONE
+      1 = ERR
+      2 = WRN
+      3 = INF
+      4 = DBG
+
+config ZMK_PIM447_BEHAVIORS
+    bool "Enable Pimoroni PIM447 Trackball Actions"
+    select ZMK_BEHAVIORS
+    default y if ZMK_PIMORONI_PIM447
+    help
+      Enable PIM447 runtime keymap behaviors.
+
+      Includes mouse/scroll mode switching,
+      speed adjustment, smoothing adjustment,
+      and RGBW hue controls.
+
+      Behaviors are independent of the local
+      hardware driver, allowing their use on
+      split central and peripheral devices.
+
+      Behavior locality and hardware access
+      must be handled by the behavior driver.
 
 if ZMK_PIMORONI_PIM447
 
-  config ZMK_PIMORONI_PIM447_AUTOMOUSE_TIMEOUT_MS
-    int "Amount of milliseconds the mouse layer will be active after using the trackball"
+config ZMK_PIMORONI_PIM447_AUTOMOUSE_TIMEOUT_MS
+    int "Automouse layer timeout in milliseconds"
     default 400
+    help
+      Time in milliseconds that the automouse
+      layer remains active after trackball
+      movement.
 
-  config ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS
+      Note: On a split peripheral, automouse
+      layer changes must be handled by the
+      central keyboard.
+
+config ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS
     int "PIM447 polling interval in milliseconds"
     range 5 1000
     default 20
     help
-      Reads the trackball periodically over I2C if int-gpios is absent.
+      Poll the PIM447 over I2C when no
+      interrupt GPIO is connected.
 
-  config ZMK_PIM447_BEHAVIORS
-    bool "Enable Pimoroni PIM447 Trackball Actions behavior"
-    depends on ZMK_PIMORONI_PIM447
-    select ZMK_BEHAVIORS
-    default y
-    help
-      Enable Pimoroni PIM447 Trackball behaviors.
+      Lower values improve responsiveness
+      but increase power consumption.
+
+      Default: 20 ms (50 Hz).
+
+      This setting is used by the modified
+      PIM447 driver when int-gpios is absent.
 
 endif # ZMK_PIMORONI_PIM447
