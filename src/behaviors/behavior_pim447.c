@@ -1,39 +1,45 @@
 /* SPDX-License-Identifier: MIT */
-/* behavior_pim447.c - ZMK behavior to adjust PIM447 trackball parameters */
 
 #define DT_DRV_COMPAT zmk_behavior_pim447
 
 #include <errno.h>
+#include <stdint.h>
+
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
-#include <drivers/behavior.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
+
+#include <drivers/behavior.h>
+
 #include <zmk/behavior.h>
 #include <zmk/event_manager.h>
 #include <zmk/keymap.h>
 
-LOG_MODULE_REGISTER(zmk_behavior_pim447, CONFIG_ZMK_LOG_LEVEL);
+#include "dt-bindings/behavior_pim447.h"
+#include "dt-bindings/pim447_rgb.h"
 
 #if defined(CONFIG_ZMK_PIMORONI_PIM447)
 #include "pimoroni_pim447.h"
+#include "pimoroni_pim447_rgb.h"
 #endif
 
-#include "dt-bindings/behavior_pim447.h"
+LOG_MODULE_REGISTER(zmk_behavior_pim447, CONFIG_ZMK_LOG_LEVEL);
 
-#define PIM447_MAX_SPEED_STEP 1
-#define PIM447_MAX_TIME_STEP 1
-#define PIM447_SMOOTHING_FACTOR_STEP 0.1f
-#define PIM447_HUE_INCREMENT_FACTOR_STEP 0.1f
+#define PIM447_MAX_SPEED_STEP              1
+#define PIM447_MAX_TIME_STEP               1
+#define PIM447_SMOOTHING_FACTOR_STEP       0.1f
+#define PIM447_HUE_INCREMENT_FACTOR_STEP   0.1f
 
-#define PIM447_MOUSE_MAX_SPEED_MAX 100
-#define PIM447_SCROLL_MAX_SPEED_MAX 20
-#define PIM447_MOUSE_MAX_TIME_MAX 50
-#define PIM447_SCROLL_MAX_TIME_MAX 20
-#define PIM447_SMOOTHING_FACTOR_MIN 0.1f
-#define PIM447_SMOOTHING_FACTOR_MAX 5.0f
-#define PIM447_HUE_INCREMENT_FACTOR_MIN 0.1f
-#define PIM447_HUE_INCREMENT_FACTOR_MAX 5.0f
+#define PIM447_MOUSE_MAX_SPEED_MAX         100
+#define PIM447_SCROLL_MAX_SPEED_MAX        20
+#define PIM447_MOUSE_MAX_TIME_MAX          50
+#define PIM447_SCROLL_MAX_TIME_MAX         20
+
+#define PIM447_SMOOTHING_FACTOR_MIN        0.1f
+#define PIM447_SMOOTHING_FACTOR_MAX        5.0f
+#define PIM447_HUE_INCREMENT_FACTOR_MIN    0.1f
+#define PIM447_HUE_INCREMENT_FACTOR_MAX    5.0f
 
 static int behavior_pim447_binding_pressed(
     struct zmk_behavior_binding *binding,
@@ -52,156 +58,132 @@ static int behavior_pim447_binding_pressed(
 
     uint32_t action = binding->param1;
 
+    if (action >= PIM447_RGB_STATIC &&
+        action <= PIM447_RGB_TOGGLE) {
+
+        int ret = pim447_rgb_apply_action(pim447_dev, action);
+
+        if (ret != 0) {
+            LOG_ERR("PIM447 RGBW action %u failed: %d",
+                    (unsigned int)action, ret);
+            return ret;
+        }
+
+        return ZMK_BEHAVIOR_OPAQUE;
+    }
+
     k_mutex_lock(&pim447_settings_lock, K_FOREVER);
 
     switch (action) {
 
     case PIM447_MOUSE_INC_MAX_SPEED:
-        if (pim447_settings.mouse_max_speed <
-            PIM447_MOUSE_MAX_SPEED_MAX) {
-            pim447_settings.mouse_max_speed +=
-                PIM447_MAX_SPEED_STEP;
+        if (pim447_settings.mouse_max_speed < PIM447_MOUSE_MAX_SPEED_MAX) {
+            pim447_settings.mouse_max_speed += PIM447_MAX_SPEED_STEP;
         }
-        LOG_DBG("Mouse max speed set to %d",
-                pim447_settings.mouse_max_speed);
+        LOG_DBG("Mouse max speed set to %d", pim447_settings.mouse_max_speed);
         break;
 
     case PIM447_MOUSE_DEC_MAX_SPEED:
         if (pim447_settings.mouse_max_speed > 1) {
-            pim447_settings.mouse_max_speed -=
-                PIM447_MAX_SPEED_STEP;
+            pim447_settings.mouse_max_speed -= PIM447_MAX_SPEED_STEP;
         }
-        LOG_DBG("Mouse max speed set to %d",
-                pim447_settings.mouse_max_speed);
+        LOG_DBG("Mouse max speed set to %d", pim447_settings.mouse_max_speed);
         break;
 
     case PIM447_SCROLL_INC_MAX_SPEED:
-        if (pim447_settings.scroll_max_speed <
-            PIM447_SCROLL_MAX_SPEED_MAX) {
-            pim447_settings.scroll_max_speed +=
-                PIM447_MAX_SPEED_STEP;
+        if (pim447_settings.scroll_max_speed < PIM447_SCROLL_MAX_SPEED_MAX) {
+            pim447_settings.scroll_max_speed += PIM447_MAX_SPEED_STEP;
         }
-        LOG_DBG("Scroll max speed set to %d",
-                pim447_settings.scroll_max_speed);
+        LOG_DBG("Scroll max speed set to %d", pim447_settings.scroll_max_speed);
         break;
 
     case PIM447_SCROLL_DEC_MAX_SPEED:
         if (pim447_settings.scroll_max_speed > 1) {
-            pim447_settings.scroll_max_speed -=
-                PIM447_MAX_SPEED_STEP;
+            pim447_settings.scroll_max_speed -= PIM447_MAX_SPEED_STEP;
         }
-        LOG_DBG("Scroll max speed set to %d",
-                pim447_settings.scroll_max_speed);
+        LOG_DBG("Scroll max speed set to %d", pim447_settings.scroll_max_speed);
         break;
 
     case PIM447_MOUSE_INC_MAX_TIME:
-        if (pim447_settings.mouse_max_time <
-            PIM447_MOUSE_MAX_TIME_MAX) {
-            pim447_settings.mouse_max_time +=
-                PIM447_MAX_TIME_STEP;
+        if (pim447_settings.mouse_max_time < PIM447_MOUSE_MAX_TIME_MAX) {
+            pim447_settings.mouse_max_time += PIM447_MAX_TIME_STEP;
         }
-        LOG_DBG("Mouse max time set to %d",
-                pim447_settings.mouse_max_time);
+        LOG_DBG("Mouse max time set to %d", pim447_settings.mouse_max_time);
         break;
 
     case PIM447_MOUSE_DEC_MAX_TIME:
         if (pim447_settings.mouse_max_time > 1) {
-            pim447_settings.mouse_max_time -=
-                PIM447_MAX_TIME_STEP;
+            pim447_settings.mouse_max_time -= PIM447_MAX_TIME_STEP;
         }
-        LOG_DBG("Mouse max time set to %d",
-                pim447_settings.mouse_max_time);
+        LOG_DBG("Mouse max time set to %d", pim447_settings.mouse_max_time);
         break;
 
     case PIM447_SCROLL_INC_MAX_TIME:
-        if (pim447_settings.scroll_max_time <
-            PIM447_SCROLL_MAX_TIME_MAX) {
-            pim447_settings.scroll_max_time +=
-                PIM447_MAX_TIME_STEP;
+        if (pim447_settings.scroll_max_time < PIM447_SCROLL_MAX_TIME_MAX) {
+            pim447_settings.scroll_max_time += PIM447_MAX_TIME_STEP;
         }
-        LOG_DBG("Scroll max time set to %d",
-                pim447_settings.scroll_max_time);
+        LOG_DBG("Scroll max time set to %d", pim447_settings.scroll_max_time);
         break;
 
     case PIM447_SCROLL_DEC_MAX_TIME:
         if (pim447_settings.scroll_max_time > 1) {
-            pim447_settings.scroll_max_time -=
-                PIM447_MAX_TIME_STEP;
+            pim447_settings.scroll_max_time -= PIM447_MAX_TIME_STEP;
         }
-        LOG_DBG("Scroll max time set to %d",
-                pim447_settings.scroll_max_time);
+        LOG_DBG("Scroll max time set to %d", pim447_settings.scroll_max_time);
         break;
 
     case PIM447_MOUSE_INC_SMOOTHING_FACTOR:
-        if (pim447_settings.mouse_smoothing_factor <
-            PIM447_SMOOTHING_FACTOR_MAX) {
-            pim447_settings.mouse_smoothing_factor +=
-                PIM447_SMOOTHING_FACTOR_STEP;
+        if (pim447_settings.mouse_smoothing_factor < PIM447_SMOOTHING_FACTOR_MAX) {
+            pim447_settings.mouse_smoothing_factor += PIM447_SMOOTHING_FACTOR_STEP;
         }
         LOG_DBG("Mouse smoothing factor set to %d.%02d",
                 (int)pim447_settings.mouse_smoothing_factor,
-                (int)(pim447_settings.mouse_smoothing_factor
-                      * 100.0f) % 100);
+                (int)(pim447_settings.mouse_smoothing_factor * 100.0f) % 100);
         break;
 
     case PIM447_MOUSE_DEC_SMOOTHING_FACTOR:
-        if (pim447_settings.mouse_smoothing_factor >
-            PIM447_SMOOTHING_FACTOR_MIN) {
-            pim447_settings.mouse_smoothing_factor -=
-                PIM447_SMOOTHING_FACTOR_STEP;
+        if (pim447_settings.mouse_smoothing_factor > PIM447_SMOOTHING_FACTOR_MIN) {
+            pim447_settings.mouse_smoothing_factor -= PIM447_SMOOTHING_FACTOR_STEP;
         }
         LOG_DBG("Mouse smoothing factor set to %d.%02d",
                 (int)pim447_settings.mouse_smoothing_factor,
-                (int)(pim447_settings.mouse_smoothing_factor
-                      * 100.0f) % 100);
+                (int)(pim447_settings.mouse_smoothing_factor * 100.0f) % 100);
         break;
 
     case PIM447_SCROLL_INC_SMOOTHING_FACTOR:
-        if (pim447_settings.scroll_smoothing_factor <
-            PIM447_SMOOTHING_FACTOR_MAX) {
-            pim447_settings.scroll_smoothing_factor +=
-                PIM447_SMOOTHING_FACTOR_STEP;
+        if (pim447_settings.scroll_smoothing_factor < PIM447_SMOOTHING_FACTOR_MAX) {
+            pim447_settings.scroll_smoothing_factor += PIM447_SMOOTHING_FACTOR_STEP;
         }
         LOG_DBG("Scroll smoothing factor set to %d.%02d",
                 (int)pim447_settings.scroll_smoothing_factor,
-                (int)(pim447_settings.scroll_smoothing_factor
-                      * 100.0f) % 100);
+                (int)(pim447_settings.scroll_smoothing_factor * 100.0f) % 100);
         break;
 
     case PIM447_SCROLL_DEC_SMOOTHING_FACTOR:
-        if (pim447_settings.scroll_smoothing_factor >
-            PIM447_SMOOTHING_FACTOR_MIN) {
-            pim447_settings.scroll_smoothing_factor -=
-                PIM447_SMOOTHING_FACTOR_STEP;
+        if (pim447_settings.scroll_smoothing_factor > PIM447_SMOOTHING_FACTOR_MIN) {
+            pim447_settings.scroll_smoothing_factor -= PIM447_SMOOTHING_FACTOR_STEP;
         }
         LOG_DBG("Scroll smoothing factor set to %d.%02d",
                 (int)pim447_settings.scroll_smoothing_factor,
-                (int)(pim447_settings.scroll_smoothing_factor
-                      * 100.0f) % 100);
+                (int)(pim447_settings.scroll_smoothing_factor * 100.0f) % 100);
         break;
 
     case PIM447_INC_HUE_INCREMENT_FACTOR:
-        if (pim447_settings.hue_increment_factor <
-            PIM447_HUE_INCREMENT_FACTOR_MAX) {
-            pim447_settings.hue_increment_factor +=
-                PIM447_HUE_INCREMENT_FACTOR_STEP;
+        if (pim447_settings.hue_increment_factor < PIM447_HUE_INCREMENT_FACTOR_MAX) {
+            pim447_settings.hue_increment_factor += PIM447_HUE_INCREMENT_FACTOR_STEP;
         }
         LOG_DBG("Hue increment factor set to %d.%02d",
                 (int)pim447_settings.hue_increment_factor,
-                (int)(pim447_settings.hue_increment_factor
-                      * 100.0f) % 100);
+                (int)(pim447_settings.hue_increment_factor * 100.0f) % 100);
         break;
 
     case PIM447_DEC_HUE_INCREMENT_FACTOR:
-        if (pim447_settings.hue_increment_factor >
-            PIM447_HUE_INCREMENT_FACTOR_MIN) {
-            pim447_settings.hue_increment_factor -=
-                PIM447_HUE_INCREMENT_FACTOR_STEP;
+        if (pim447_settings.hue_increment_factor > PIM447_HUE_INCREMENT_FACTOR_MIN) {
+            pim447_settings.hue_increment_factor -= PIM447_HUE_INCREMENT_FACTOR_STEP;
         }
         LOG_DBG("Hue increment factor set to %d.%02d",
                 (int)pim447_settings.hue_increment_factor,
-                (int)(pim447_settings.hue_increment_factor
-                      * 100.0f) % 100);
+                (int)(pim447_settings.hue_increment_factor * 100.0f) % 100);
         break;
 
     case PIM447_TOGGLE_MODE:
@@ -217,8 +199,7 @@ static int behavior_pim447_binding_pressed(
         break;
 
     default:
-        LOG_WRN("Unknown trackball adjustment action: %d",
-                action);
+        LOG_WRN("Unknown PIM447 action: %u", (unsigned int)action);
         k_mutex_unlock(&pim447_settings_lock);
         return -EINVAL;
     }
@@ -245,11 +226,8 @@ static int behavior_pim447_binding_released(
     return ZMK_BEHAVIOR_OPAQUE;
 }
 
-static const struct behavior_driver_api
-    behavior_pim447_driver_api = {
-
+static const struct behavior_driver_api behavior_pim447_driver_api = {
     .locality = BEHAVIOR_LOCALITY_GLOBAL,
-
     .binding_pressed = behavior_pim447_binding_pressed,
     .binding_released = behavior_pim447_binding_released,
 };
