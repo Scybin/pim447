@@ -16,6 +16,7 @@ if(CONFIG_ZMK_PIMORONI_PIM447)
     zephyr_library_sources(
         src/pimoroni_pim447.c
         src/pimoroni_pim447_led.c
+        src/pimoroni_pim447_rgb.c
     )
 
 endif()

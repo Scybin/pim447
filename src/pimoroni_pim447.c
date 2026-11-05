@@ -17,6 +17,7 @@
 
 #include "pimoroni_pim447.h"
 #include "pimoroni_pim447_led.h"
+#include "pimoroni_pim447_rgb.h"
 
 LOG_MODULE_REGISTER(zmk_pimoroni_pim447, CONFIG_ZMK_PIMORONI_PIM447_LOG_LEVEL);
 
@@ -127,6 +128,8 @@ void pim447_enable_sleep(const struct device *dev)
     (void)k_work_cancel_delayable(&pim447_poll_work);
 #endif
 
+    pim447_rgb_stop();
+
     LOG_DBG("PIM447 sleep enabled");
 }
 
@@ -163,6 +166,8 @@ void pim447_disable_sleep(const struct device *dev)
     (void)k_work_reschedule(&pim447_poll_work,
                             K_MSEC(CONFIG_ZMK_PIMORONI_PIM447_POLL_INTERVAL_MS));
 #endif
+
+    pim447_rgb_start(dev);
 
     LOG_DBG("PIM447 sleep disabled");
 }
@@ -466,21 +471,9 @@ static void pimoroni_pim447_work_handler(struct k_work *work)
         float hue_increment = pim447_settings.hue_increment_factor;
         k_mutex_unlock(&pim447_settings_lock);
 
-        k_mutex_lock(&data->data_lock, K_FOREVER);
-        data->hue += speed * hue_increment;
-        if (data->hue >= 360.0f) {
-            data->hue -= 360.0f;
-        }
-        float hue = data->hue;
-        k_mutex_unlock(&data->data_lock);
-
-        uint8_t r, g, b, w;
-        hsv_to_rgbw(hue, 1.0f, 1.0f, &r, &g, &b, &w);
-
-        ret = pimoroni_pim447_set_leds(dev, r, g, b, w);
-        if (ret) {
-            LOG_ERR("Failed to set LEDs: %d", ret);
-        }
+        /* Only REACTIVE lighting follows movement. STATIC and RAINBOW do not
+         * get overwritten by trackball motion. */
+        pim447_rgb_on_motion(dev, speed, hue_increment);
     }
 }
 
@@ -680,6 +673,8 @@ static int pimoroni_pim447_init(const struct device *dev)
         LOG_ERR("Failed to enable PIM447");
         return ret;
     }
+
+    pim447_rgb_start(dev);
 
     LOG_INF("PIM447 driver initialized");
     return 0;
